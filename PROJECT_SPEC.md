@@ -58,7 +58,18 @@ The steward sends `POST /cases/{id}/reopen` after an out-of-tolerance result.
 Only `recheck_required` cases may move back to `awaiting_measurement`. The
 service records the actor and reason in the audit trail.
 
-### 5. Seal Verification
+### 5. Cancel Verification Case
+
+The steward sends `POST /cases/{id}/cancel` when a case was opened against the
+wrong device, nominal value, or tolerance, before any measurement is recorded.
+Only an `awaiting_measurement` case with no measurements on record may be
+canceled. The actor, reason, and cancellation time are retained on the case and
+in an audit event. Cancellation is terminal, releases the device's
+unfinished-case slot so a fresh case can be opened, and leaves the canceled
+record historically readable. Cases that already carry measurements, or that
+are in `review_ready`, `recheck_required`, or `sealed`, cannot take this path.
+
+### 6. Seal Verification
 
 The verifier sends `POST /cases/{id}/seal` after an accepted measurement. Only
 `review_ready` cases may be sealed. The service selects the accepted
@@ -76,9 +87,11 @@ VerificationCase state:
 
 - `awaiting_measurement -> review_ready`
 - `awaiting_measurement -> recheck_required`
+- `awaiting_measurement -> canceled`
 - `recheck_required -> awaiting_measurement`
 - `review_ready -> sealed`
 - `sealed` is terminal.
+- `canceled` is terminal.
 
 Required invariants:
 
@@ -87,7 +100,13 @@ Required invariants:
 - Measurements are accepted only while a case is awaiting measurement.
 - A tolerance must be positive.
 - A case can have at most one evidence seal.
-- A sealed case cannot accept measurements, reopen, or seal again.
+- A sealed case cannot accept measurements, reopen, seal again, or be canceled.
+- A case can be canceled only while awaiting measurement with zero recorded
+  measurements; a canceled case retains its actor, reason, and time, cannot
+  accept measurements or reopen, and no longer occupies its device's
+  unfinished-case slot.
+- Cancellation and measurement of the same case are mutually exclusive; the
+  repository lock serializes them so exactly one outcome is ever committed.
 - Every mutation that changes a case also appends an audit event in the same
   repository commit.
 
@@ -111,6 +130,7 @@ Required invariants:
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`
 - `POST /cases/{id}/reopen`
+- `POST /cases/{id}/cancel`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
 
@@ -121,7 +141,10 @@ bounded production smoke command under `cmd/workflowcheck`. The command starts
 an HTTP test server in the same process, calls the public routes, and verifies
 both success and failure behavior. The seal check also races two concurrent
 seal requests to prove that the repository mutation lock permits exactly one
-seal.
+seal. The cancel check races a cancellation against a first measurement to
+prove the lock commits exactly one of the two facts, verifies the device slot
+is released only when cancellation wins, and confirms progressed, measured,
+reopened, and sealed cases cannot be canceled.
 
 Tests are intentionally deferred for this initialization baseline. The later
 engineering-task stage will add unit and integration tests, including red/green

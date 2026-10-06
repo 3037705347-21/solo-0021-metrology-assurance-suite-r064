@@ -26,6 +26,11 @@ type ReopenCaseRequest struct {
 	Reason string `json:"reason"`
 }
 
+type CancelCaseRequest struct {
+	Actor  string `json:"actor"`
+	Reason string `json:"reason"`
+}
+
 type SealCaseRequest struct {
 	Reviewer string `json:"reviewer"`
 	Summary  string `json:"summary"`

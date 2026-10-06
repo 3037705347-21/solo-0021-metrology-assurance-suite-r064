@@ -232,6 +232,44 @@ func (s *Service) ReopenCase(ctx context.Context, caseID string, input contracts
 	return result, err
 }
 
+func (s *Service) CancelCase(ctx context.Context, caseID string, input contracts.CancelCaseRequest) (contracts.CaseResponse, error) {
+	var result contracts.CaseResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		id := strings.TrimSpace(caseID)
+		item, exists := m.Case(id)
+		if !exists {
+			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
+		}
+		measurements := m.Measurements(item.ID)
+		// The domain transition rechecks state and measurement history inside
+		// the same locked commit, so a concurrent measurement and a cancellation
+		// can never both succeed.
+		if err := item.Cancel(input.Actor, input.Reason, len(measurements), s.now()); err != nil {
+			return err
+		}
+		if err := m.UpdateCase(item); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"case",
+			item.ID,
+			item.ID,
+			"case_canceled",
+			item.CanceledBy,
+			item.CancelReason,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = caseResponse(m, item)
+		return nil
+	})
+	return result, err
+}
+
 func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.SealCaseRequest) (contracts.CaseResponse, error) {
 	var result contracts.CaseResponse
 	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {

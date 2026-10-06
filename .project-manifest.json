@@ -135,6 +135,28 @@
       ]
     },
     {
+      "id": "cancel-verification-case",
+      "name": "Cancel verification case",
+      "entry": "POST /cases/{id}/cancel",
+      "steps": [
+        "verify the case is awaiting measurement with no recorded measurements",
+        "record the actor, reason, and cancellation time",
+        "commit the terminal cancellation and audit event atomically, releasing the device slot"
+      ],
+      "success": "returns a canceled case with the retained reason and time, and the device can open a new case",
+      "failure": "returns conflict for a measured, review-ready, recheck, reopened, sealed, or already-canceled case",
+      "verification": "workflowcheck cancels an untouched case, confirms history and slot release, rejects every ineligible path, and races cancellation against a first measurement",
+      "module_ids": [
+        "runtimecheck",
+        "httpapi",
+        "assurance",
+        "domain",
+        "repository",
+        "contracts",
+        "bootstrap"
+      ]
+    },
+    {
       "id": "seal-verification",
       "name": "Seal verification",
       "entry": "POST /cases/{id}/seal",

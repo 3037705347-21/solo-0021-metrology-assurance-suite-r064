@@ -25,6 +25,9 @@
         "tolerance is positive",
         "only awaiting_measurement accepts measurements",
         "sealed is terminal",
+        "canceled is terminal and retains the canceling actor, reason, and time",
+        "cancellation is allowed only while awaiting measurement with zero recorded measurements",
+        "a canceled case releases the device's unfinished-case slot",
         "version increases on every state change"
       ]
     },
@@ -74,16 +77,19 @@
         "awaiting_measurement",
         "review_ready",
         "recheck_required",
-        "sealed"
+        "sealed",
+        "canceled"
       ],
       "transitions": [
         "awaiting_measurement->review_ready",
         "awaiting_measurement->recheck_required",
+        "awaiting_measurement->canceled",
         "recheck_required->awaiting_measurement",
         "review_ready->sealed"
       ],
       "invariants": [
         "sealed does not transition again",
+        "canceled does not transition again and is only reachable from awaiting_measurement without measurements",
         "each transition increments version",
         "case mutation and audit event share one atomic commit"
       ]
@@ -189,6 +195,11 @@
       "workflow_id": "seal-verification",
       "description": "Concurrent reviewers may both observe a ready case; only an atomic commit that rechecks state and seal uniqueness permits one seal",
       "observable_failure": "two seals are created, or the response claims success while no sealed case is readable"
+    },
+    {
+      "workflow_id": "cancel-verification-case",
+      "description": "Cancellation can inspect a stale case view or race a first measurement; only rechecking state and measurement history inside one locked commit prevents both a cancellation and a measurement from being recorded",
+      "observable_failure": "the case is both canceled and advanced, or a canceled case still blocks the device from opening a new case"
     }
   ]
 }

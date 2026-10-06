@@ -39,6 +39,7 @@ func main() {
 		"open-verification-case":   checkOpenVerificationCase,
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
+		"cancel-verification-case": checkCancelVerificationCase,
 		"seal-verification":        checkSealVerification,
 	}
 	run, ok := checks[*workflow]
@@ -304,6 +305,358 @@ func checkReopenVerificationCase() error {
 	return nil
 }
 
+func checkCancelVerificationCase() error {
+	h := newHarness()
+	defer h.close()
+
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+
+	canceled, err := h.cancelCase(caseID, "Lin", "case opened against the wrong nominal value")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(canceled, http.StatusOK); err != nil {
+		return err
+	}
+	state, err := nestedString(canceled.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if state != "canceled" {
+		return fmt.Errorf("canceled case state = %q", state)
+	}
+	canceledBy, err := nestedString(canceled.Body, "case", "canceled_by")
+	if err != nil {
+		return err
+	}
+	if canceledBy != "Lin" {
+		return fmt.Errorf("canceled_by = %q", canceledBy)
+	}
+	cancelReason, err := nestedString(canceled.Body, "case", "cancel_reason")
+	if err != nil {
+		return err
+	}
+	if cancelReason != "case opened against the wrong nominal value" {
+		return fmt.Errorf("cancel_reason = %q", cancelReason)
+	}
+	canceledAt, err := nestedString(canceled.Body, "case", "canceled_at")
+	if err != nil {
+		return err
+	}
+	if canceledAt == "" {
+		return errors.New("canceled_at was not recorded")
+	}
+
+	// The historical read still explains the cancellation, including the event.
+	read, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	readState, err := nestedString(read.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if readState != "canceled" {
+		return fmt.Errorf("historical read state = %q", readState)
+	}
+	events, err := h.request(http.MethodGet, "/cases/"+caseID+"/events", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(events, http.StatusOK); err != nil {
+		return err
+	}
+	if !hasEvent(events.Body, "case_canceled") {
+		return errors.New("cancel audit event is missing")
+	}
+
+	// The device's unfinished-case slot is released: a new case can open.
+	reopenedDevice, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reopenedDevice, http.StatusCreated); err != nil {
+		return err
+	}
+	newState, err := nestedString(reopenedDevice.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if newState != "awaiting_measurement" {
+		return fmt.Errorf("reopened device case state = %q", newState)
+	}
+	newCaseID, err := nestedString(reopenedDevice.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	if newCaseID == caseID {
+		return errors.New("new case reused the canceled case id")
+	}
+
+	// A canceled case is terminal: no measurement, reopen, seal, or second cancel.
+	afterMeasurement, err := h.recordMeasurement(caseID, 25.1, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(afterMeasurement, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(afterMeasurement, "state_conflict"); err != nil {
+		return err
+	}
+	afterReopen, err := h.request(http.MethodPost, "/cases/"+caseID+"/reopen", map[string]any{
+		"actor":  "Lin",
+		"reason": "attempt to revive",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(afterReopen, http.StatusConflict); err != nil {
+		return err
+	}
+	afterSeal, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Lin",
+		"summary":  "attempt to seal",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(afterSeal, http.StatusConflict); err != nil {
+		return err
+	}
+	secondCancel, err := h.cancelCase(caseID, "Lin", "duplicate cancel")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(secondCancel, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(secondCancel, "state_conflict"); err != nil {
+		return err
+	}
+
+	// Cancel requires an actor and a reason.
+	missingActorDevice, err := h.createDevice("MET-1502")
+	if err != nil {
+		return err
+	}
+	missingActorCase, err := h.openCase(missingActorDevice)
+	if err != nil {
+		return err
+	}
+	missingActorID, err := nestedString(missingActorCase.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	missingActor, err := h.cancelCase(missingActorID, "  ", "reason provided")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(missingActor, http.StatusBadRequest); err != nil {
+		return err
+	}
+
+	// A case with a measurement is not cancelable, in every progressed state.
+	readyID, err := h.readyCase("MET-1503")
+	if err != nil {
+		return err
+	}
+	cancelReady, err := h.cancelCase(readyID, "Lin", "too late to cancel")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(cancelReady, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(cancelReady, "state_conflict"); err != nil {
+		return err
+	}
+
+	recheckID, err := h.rejectedCase("MET-1504")
+	if err != nil {
+		return err
+	}
+	cancelRecheck, err := h.cancelCase(recheckID, "Lin", "too late to cancel")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(cancelRecheck, http.StatusConflict); err != nil {
+		return err
+	}
+
+	sealedID, err := h.sealedCase("MET-1505")
+	if err != nil {
+		return err
+	}
+	cancelSealed, err := h.cancelCase(sealedID, "Lin", "cannot cancel sealed")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(cancelSealed, http.StatusConflict); err != nil {
+		return err
+	}
+
+	// A reopened awaiting_measurement case still carries the rejected
+	// measurement, so it cannot take the no-measurement cancellation path.
+	reopenedID, err := h.rejectedCase("MET-1506")
+	if err != nil {
+		return err
+	}
+	reopened, err := h.request(http.MethodPost, "/cases/"+reopenedID+"/reopen", map[string]any{
+		"actor":  "Lin",
+		"reason": "setup replaced",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reopened, http.StatusOK); err != nil {
+		return err
+	}
+	cancelReopened, err := h.cancelCase(reopenedID, "Lin", "reopened case has a measurement")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(cancelReopened, http.StatusConflict); err != nil {
+		return err
+	}
+
+	if err := checkCancelMeasurementRace("MET-1507"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func checkCancelMeasurementRace(tag string) error {
+	h := newHarness()
+	defer h.close()
+
+	deviceID, err := h.createDevice(tag)
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+
+	type outcome struct {
+		response apiResponse
+		err      error
+	}
+	results := make(chan outcome, 2)
+	var wait sync.WaitGroup
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		response, err := h.cancelCase(caseID, "Lin", "wrong device, aborting")
+		results <- outcome{response: response, err: err}
+	}()
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		response, err := h.recordMeasurement(caseID, 25.1, "Rui")
+		results <- outcome{response: response, err: err}
+	}()
+	wait.Wait()
+	close(results)
+
+	cancels := 0
+	measurements := 0
+	conflicts := 0
+	for item := range results {
+		if item.err != nil {
+			return item.err
+		}
+		switch {
+		case item.response.Status == http.StatusOK:
+			cancels++
+		case item.response.Status == http.StatusCreated:
+			measurements++
+		case item.response.Status == http.StatusConflict:
+			conflicts++
+		default:
+			return fmt.Errorf("unexpected concurrent cancel/measurement status %d: %s", item.response.Status, item.response.Raw)
+		}
+	}
+	if conflicts != 1 || cancels+measurements != 1 {
+		return fmt.Errorf("concurrent cancel/measurement outcomes: %d canceled, %d measured, %d conflicts", cancels, measurements, conflicts)
+	}
+
+	read, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	finalState, err := nestedString(read.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	recorded, err := nestedSlice(read.Body, "measurements")
+	if err != nil {
+		return err
+	}
+	switch finalState {
+	case "canceled":
+		if len(recorded) != 0 {
+			return fmt.Errorf("canceled case carries %d measurements", len(recorded))
+		}
+		// Cancellation released the device slot: a new case can open.
+		second, err := h.request(http.MethodPost, "/cases", map[string]any{
+			"device_id": deviceID,
+			"nominal":   25.0,
+			"tolerance": 0.5,
+			"steward":   "Qiao",
+		})
+		if err != nil {
+			return err
+		}
+		if err := expectStatus(second, http.StatusCreated); err != nil {
+			return err
+		}
+	case "review_ready", "recheck_required":
+		if len(recorded) != 1 {
+			return fmt.Errorf("measured case carries %d measurements, want 1", len(recorded))
+		}
+		// The measurement winner still occupies the device slot: a new case
+		// for the device must be rejected.
+		second, err := h.request(http.MethodPost, "/cases", map[string]any{
+			"device_id": deviceID,
+			"nominal":   25.0,
+			"tolerance": 0.5,
+			"steward":   "Qiao",
+		})
+		if err != nil {
+			return err
+		}
+		if err := expectStatus(second, http.StatusConflict); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unexpected post-race state %q", finalState)
+	}
+	return nil
+}
+
 func checkSealVerification() error {
 	h := newHarness()
 	defer h.close()
@@ -463,6 +816,13 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 	})
 }
 
+func (h *harness) cancelCase(caseID, actor, reason string) (apiResponse, error) {
+	return h.request(http.MethodPost, "/cases/"+caseID+"/cancel", map[string]any{
+		"actor":  actor,
+		"reason": reason,
+	})
+}
+
 func (h *harness) rejectedCase(tag string) (string, error) {
 	deviceID, err := h.createDevice(tag)
 	if err != nil {
@@ -500,6 +860,24 @@ func (h *harness) readyCase(tag string) (string, error) {
 		return "", err
 	}
 	response, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return caseID, nil
+}
+
+func (h *harness) sealedCase(tag string) (string, error) {
+	caseID, err := h.readyCase(tag)
+	if err != nil {
+		return "", err
+	}
+	response, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Lin",
+		"summary":  "accepted measurement sealed for review",
+	})
 	if err != nil {
 		return "", err
 	}

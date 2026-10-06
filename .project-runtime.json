@@ -28,6 +28,10 @@
       "command": "go run ./cmd/workflowcheck --workflow reopen-verification-case"
     },
     {
+      "workflow_id": "cancel-verification-case",
+      "command": "go run ./cmd/workflowcheck --workflow cancel-verification-case"
+    },
+    {
       "workflow_id": "seal-verification",
       "command": "go run ./cmd/workflowcheck --workflow seal-verification"
     }
