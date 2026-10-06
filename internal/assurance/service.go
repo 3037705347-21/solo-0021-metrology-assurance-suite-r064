@@ -232,6 +232,51 @@ func (s *Service) ReopenCase(ctx context.Context, caseID string, input contracts
 	return result, err
 }
 
+func (s *Service) CancelCase(ctx context.Context, caseID string, input contracts.CancelCaseRequest) (contracts.CaseResponse, error) {
+	var result contracts.CaseResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		id := strings.TrimSpace(caseID)
+		item, exists := m.Case(id)
+		if !exists {
+			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
+		}
+		actor := strings.TrimSpace(input.Actor)
+		reason := strings.TrimSpace(input.Reason)
+		if actor == "" || reason == "" {
+			return fmt.Errorf("%w: actor and reason are required", domain.ErrInvalidInput)
+		}
+		if item.State != domain.CaseAwaitingMeasurement {
+			return fmt.Errorf("%w: only a case awaiting measurement can be cancelled", domain.ErrStateConflict)
+		}
+		if len(m.Measurements(item.ID)) > 0 {
+			return fmt.Errorf("%w: case %s already has measurements and cannot be cancelled", domain.ErrStateConflict, item.ID)
+		}
+		if err := item.Cancel(reason, s.now()); err != nil {
+			return err
+		}
+		if err := m.UpdateCase(item); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"case",
+			item.ID,
+			item.ID,
+			"case_cancelled",
+			actor,
+			reason,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = caseResponse(m, item)
+		return nil
+	})
+	return result, err
+}
+
 func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.SealCaseRequest) (contracts.CaseResponse, error) {
 	var result contracts.CaseResponse
 	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {

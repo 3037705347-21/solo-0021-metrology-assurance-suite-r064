@@ -14,19 +14,22 @@ const (
 	CaseReviewReady         CaseState = "review_ready"
 	CaseRecheckRequired     CaseState = "recheck_required"
 	CaseSealed              CaseState = "sealed"
+	CaseCancelled           CaseState = "cancelled"
 )
 
 type VerificationCase struct {
-	ID        string     `json:"id"`
-	DeviceID  string     `json:"device_id"`
-	Nominal   float64    `json:"nominal"`
-	Tolerance float64    `json:"tolerance"`
-	Steward   string     `json:"steward"`
-	State     CaseState  `json:"state"`
-	Version   int        `json:"version"`
-	OpenedAt  time.Time  `json:"opened_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	SealedAt  *time.Time `json:"sealed_at,omitempty"`
+	ID           string     `json:"id"`
+	DeviceID     string     `json:"device_id"`
+	Nominal      float64    `json:"nominal"`
+	Tolerance    float64    `json:"tolerance"`
+	Steward      string     `json:"steward"`
+	State        CaseState  `json:"state"`
+	Version      int        `json:"version"`
+	OpenedAt     time.Time  `json:"opened_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	SealedAt     *time.Time `json:"sealed_at,omitempty"`
+	CancelledAt  *time.Time `json:"cancelled_at,omitempty"`
+	CancelReason string     `json:"cancel_reason,omitempty"`
 }
 
 func NewVerificationCase(id, deviceID string, nominal, tolerance float64, steward string, at time.Time) (VerificationCase, error) {
@@ -58,15 +61,18 @@ func (c VerificationCase) Validate() error {
 		return fmt.Errorf("%w: case version and timestamps are required", ErrInvalidInput)
 	}
 	switch c.State {
-	case CaseAwaitingMeasurement, CaseReviewReady, CaseRecheckRequired, CaseSealed:
-		return nil
+	case CaseAwaitingMeasurement, CaseReviewReady, CaseRecheckRequired, CaseSealed, CaseCancelled:
 	default:
 		return fmt.Errorf("%w: unsupported case state %q", ErrInvalidInput, c.State)
 	}
+	if c.State == CaseCancelled && (c.CancelledAt == nil || c.CancelReason == "") {
+		return fmt.Errorf("%w: a cancelled case requires a cancel time and reason", ErrInvalidInput)
+	}
+	return nil
 }
 
 func (c VerificationCase) IsUnfinished() bool {
-	return c.State != CaseSealed
+	return c.State != CaseSealed && c.State != CaseCancelled
 }
 
 func (c *VerificationCase) RecordMeasurement(accepted bool, at time.Time) error {
@@ -102,6 +108,23 @@ func (c *VerificationCase) Seal(at time.Time) error {
 	c.Version++
 	c.UpdatedAt = stamp
 	c.SealedAt = &stamp
+	return nil
+}
+
+func (c *VerificationCase) Cancel(reason string, at time.Time) error {
+	if c.State != CaseAwaitingMeasurement {
+		return fmt.Errorf("%w: only a case awaiting measurement can be cancelled", ErrStateConflict)
+	}
+	trimmed := strings.TrimSpace(reason)
+	if trimmed == "" {
+		return fmt.Errorf("%w: cancel reason is required", ErrInvalidInput)
+	}
+	stamp := at.UTC()
+	c.State = CaseCancelled
+	c.Version++
+	c.UpdatedAt = stamp
+	c.CancelledAt = &stamp
+	c.CancelReason = trimmed
 	return nil
 }
 

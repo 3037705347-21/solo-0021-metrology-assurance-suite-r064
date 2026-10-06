@@ -5,8 +5,9 @@
 Metrology Assurance Suite is a local HTTP service that keeps a traceable record
 of laboratory measurement assurance work. It registers devices, opens a
 verification case for one device, records technician measurements, requests a
-repeat measurement when tolerance is exceeded, and seals the final evidence
-record after review.
+repeat measurement when tolerance is exceeded, cancels a case that was opened
+in error before any measurement exists, and seals the final evidence record
+after review.
 
 The service is intentionally self-contained. It uses an in-memory repository
 with atomic copy-on-write mutations and does not require a database or an
@@ -23,7 +24,8 @@ external service.
 - Device: a laboratory asset with a unique asset tag, model, room, steward, and
   lifecycle state.
 - VerificationCase: one bounded assurance activity for a device, with a nominal
-  value, tolerance, current state, version, and assigned steward.
+  value, tolerance, current state, version, assigned steward, and cancellation
+  details when cancelled.
 - Measurement: an observed value, computed deviation, acceptance decision,
   technician, and timestamp.
 - EvidenceSeal: the immutable closing record for a reviewed case, including the
@@ -58,7 +60,17 @@ The steward sends `POST /cases/{id}/reopen` after an out-of-tolerance result.
 Only `recheck_required` cases may move back to `awaiting_measurement`. The
 service records the actor and reason in the audit trail.
 
-### 5. Seal Verification
+### 5. Cancel Verification Case
+
+The steward sends `POST /cases/{id}/cancel` with an actor and reason when the
+case was opened with the wrong device, nominal value, or tolerance. Only a
+case in `awaiting_measurement` with no recorded measurements may be cancelled.
+The service stores the cancel reason and time on the case, moves it to
+`cancelled`, and appends a `case_cancelled` audit event in the same commit.
+Cancelling releases the device so a replacement case can be opened for it,
+and historical reads of the cancelled case still return the reason and time.
+
+### 6. Seal Verification
 
 The verifier sends `POST /cases/{id}/seal` after an accepted measurement. Only
 `review_ready` cases may be sealed. The service selects the accepted
@@ -76,9 +88,10 @@ VerificationCase state:
 
 - `awaiting_measurement -> review_ready`
 - `awaiting_measurement -> recheck_required`
+- `awaiting_measurement -> cancelled`
 - `recheck_required -> awaiting_measurement`
 - `review_ready -> sealed`
-- `sealed` is terminal.
+- `sealed` and `cancelled` are terminal.
 
 Required invariants:
 
@@ -87,7 +100,10 @@ Required invariants:
 - Measurements are accepted only while a case is awaiting measurement.
 - A tolerance must be positive.
 - A case can have at most one evidence seal.
-- A sealed case cannot accept measurements, reopen, or seal again.
+- A case can be cancelled only while it awaits measurement and has no recorded
+  measurements; the cancel reason and time are kept on the case.
+- A sealed or cancelled case cannot accept measurements, reopen, cancel, or
+  seal again.
 - Every mutation that changes a case also appends an audit event in the same
   repository commit.
 
@@ -111,6 +127,7 @@ Required invariants:
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`
 - `POST /cases/{id}/reopen`
+- `POST /cases/{id}/cancel`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
 
@@ -121,7 +138,8 @@ bounded production smoke command under `cmd/workflowcheck`. The command starts
 an HTTP test server in the same process, calls the public routes, and verifies
 both success and failure behavior. The seal check also races two concurrent
 seal requests to prove that the repository mutation lock permits exactly one
-seal.
+seal, and the cancel check races a cancel against a measurement to prove that
+exactly one of the two facts is committed.
 
 Tests are intentionally deferred for this initialization baseline. The later
 engineering-task stage will add unit and integration tests, including red/green

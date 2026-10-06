@@ -84,6 +84,20 @@ func (s *Server) reopenCase(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, view)
 }
 
+func (s *Server) cancelCase(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CancelCaseRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CancelCase(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
 func (s *Server) sealCase(writer http.ResponseWriter, request *http.Request) {
 	input, err := decodeJSON[contracts.SealCaseRequest](writer, request)
 	if err != nil {
